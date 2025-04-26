@@ -251,7 +251,7 @@ class JupyterFIMGenerator:
             for line in lines:
                 # Skip empty lines, very short lines, or lines that are mostly whitespace
                 stripped_line = line.strip()
-                if len(stripped_line) < 8:  # Increased minimum line length
+                if len(stripped_line) < 12:  # Increased minimum line length
                     continue
                     
                 # Skip lines that are just comments
@@ -261,15 +261,23 @@ class JupyterFIMGenerator:
                 # Skip lines that are just docstrings
                 if stripped_line.startswith('"""') or stripped_line.startswith("'''"):
                     continue
-                    
+                
+                # Skip lines that are just assignments or simple statements
+                if '=' in stripped_line and len(stripped_line.split('=')) == 2:
+                    continue
+                
+                # Skip lines that are just function calls without arguments
+                if stripped_line.endswith('()'):
+                    continue
+                
                 # Find a good split point in the middle of the line
                 # Try to split at natural boundaries like spaces, operators, etc.
                 split_points = []
                 for j, char in enumerate(line):
-                    if char in ' ,;=+-*/()[]{}<>':
+                    if char in ' ,;=+-*/()[]{}<>:':
                         split_points.append(j)
                 
-                if len(split_points) < 1:  # Only need 1 split point for prefix and middle
+                if len(split_points) < 2:  # Need at least 2 split points for better quality
                     continue
                     
                 # Choose a split point in the middle third of the line
@@ -287,24 +295,38 @@ class JupyterFIMGenerator:
                 prefix = line[:split_point]
                 middle = line[split_point:].strip()
                 
-                # Only include if both parts are meaningful
-                if len(prefix.strip()) >= 3 and len(middle.strip()) >= 3:  # Increased minimum part length
-                    # Skip examples where the middle is just whitespace or very short
-                    if len(middle.strip()) < 3:
-                        continue
-                        
-                    # Skip examples where the prefix ends with whitespace
-                    if prefix.rstrip() != prefix:
-                        continue
-                    
-                    examples.append({
-                        'prefix': prefix,
-                        'middle': middle,
-                        'suffix': '',  # No suffix for midline splits
-                        'split_type': 'midline',
-                        'cell_index': i,
-                        'line_number': lines.index(line)
-                    })
+                # Additional quality checks
+                if len(prefix.strip()) < 5 or len(middle.strip()) < 5:  # Increased minimum part length
+                    continue
+                
+                # Skip if the prefix ends with whitespace
+                if prefix.rstrip() != prefix:
+                    continue
+                
+                # Skip if the middle starts with whitespace
+                if middle.lstrip() != middle:
+                    continue
+                
+                # Skip if the middle is just a closing bracket or similar
+                if middle.strip() in ')]}':
+                    continue
+                
+                # Skip if the prefix is just an opening bracket or similar
+                if prefix.strip() in '([{':
+                    continue
+                
+                # Skip if the middle is just a comma or similar
+                if middle.strip() in ',;:':
+                    continue
+                
+                examples.append({
+                    'prefix': prefix,
+                    'middle': middle,
+                    'suffix': '',  # No suffix for midline splits
+                    'split_type': 'midline',
+                    'cell_index': i,
+                    'line_number': lines.index(line)
+                })
         
         return examples
     
@@ -400,7 +422,7 @@ def create_jupyter_fim_dataset(notebooks_directory: str, output_file: str):
 
 def filter_and_clean_examples(examples: List[Dict[str, Any]], 
                               min_length: int = 4,
-                              max_length: int = 256) -> List[Dict[str, Any]]:
+                              max_length: int = 1024) -> List[Dict[str, Any]]:
     """
     Filter and clean examples to ensure quality.
     
@@ -417,9 +439,9 @@ def filter_and_clean_examples(examples: List[Dict[str, Any]],
     for example in examples:
         # Check lengths
         if example['split_type'] != 'midline':
-            if (len(example['prefix']) < min_length * 5 or
+            if (len(example['prefix']) < min_length  or
                 len(example['middle']) < min_length or
-                len(example['suffix']) < min_length * 5):
+                len(example['suffix']) < min_length ):
                 continue
             
             if (len(example['prefix']) > max_length or
@@ -465,7 +487,8 @@ if __name__ == "__main__":
         examples = json.load(f)
     
     filtered_examples = filter_and_clean_examples(examples)
-    
+    # downnsample the number of midline examples created
+
     # Save filtered dataset
     filtered_output_file = "jupyter_fim_dataset_filtered.json"
     with open(filtered_output_file, 'w', encoding='utf-8') as f:
