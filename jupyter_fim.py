@@ -2,7 +2,7 @@ import os
 import json
 import random
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Tuple, Optional
 
 
 class JupyterFIMGenerator:
@@ -79,6 +79,8 @@ class JupyterFIMGenerator:
     def generate_cell_level_fim(self, code_cells: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Generate FIM examples at the cell level, where entire cells become prefix, middle, or suffix.
+        Includes cell outputs in the prefix when available.
+        Ensures newline characters are properly handled at split points.
         
         Args:
             code_cells: List of code cells from the notebook
@@ -104,9 +106,18 @@ class JupyterFIMGenerator:
                 middle_cells = code_cells[split_points[0]:split_points[1]]
                 suffix_cells = code_cells[split_points[1]:]
                 
+                # Get source code for each part, preserving newlines
                 prefix = '\n\n'.join([self._get_cell_source(cell) for cell in prefix_cells])
                 middle = '\n\n'.join([self._get_cell_source(cell) for cell in middle_cells])
                 suffix = '\n\n'.join([self._get_cell_source(cell) for cell in suffix_cells])
+                
+                # Add output from the last prefix cell if available
+                if prefix_cells and 'outputs' in prefix_cells[-1] and prefix_cells[-1]['outputs']:
+                    last_output = prefix_cells[-1]['outputs'][-1]  # Get the last output
+                    if 'text' in last_output:
+                        prefix += '\n\n# Output from previous cell:\n' + ''.join(last_output['text'])
+                    elif 'data' in last_output and 'text/plain' in last_output['data']:
+                        prefix += '\n\n# Output from previous cell:\n' + ''.join(last_output['data']['text/plain'])
                 
                 examples.append({
                     'prefix': prefix,
@@ -141,16 +152,23 @@ class JupyterFIMGenerator:
                 example = self._create_intracell_fim(source, i)
                 if example:
                     examples.append(example)
+                
+                # Also create expanded version with context from previous cells
+                expanded_example = self._create_intracell_fim(source, i, code_cells)
+                if expanded_example:
+                    examples.append(expanded_example)
         
         return examples
     
-    def _create_intracell_fim(self, code: str, cell_index: int) -> Optional[Dict[str, Any]]:
+    def _create_intracell_fim(self, code: str, cell_index: int, code_cells: List[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """
         Create a FIM example by splitting a single code cell.
+        Ensures newline characters are properly handled at split points.
         
         Args:
             code: Source code string
             cell_index: Index of the cell in the notebook
+            code_cells: Optional list of all code cells for expanded context
             
         Returns:
             FIM example dictionary or None if no suitable split found
@@ -182,10 +200,44 @@ class JupyterFIMGenerator:
             first_split = all_matches[indices[0]]
             second_split = all_matches[indices[1]]
         
-        # Extract the parts
-        prefix = code[:first_split.start()]
-        middle = code[first_split.start():second_split.start()]
-        suffix = code[second_split.start():]
+        # Extract the parts, ensuring we preserve newlines
+        lines = code.splitlines(keepends=True)
+        first_line_idx = len(code[:first_split.start()].splitlines())
+        second_line_idx = len(code[:second_split.start()].splitlines())
+        
+        prefix = ''.join(lines[:first_line_idx])
+        middle = ''.join(lines[first_line_idx:second_line_idx])
+        suffix = ''.join(lines[second_line_idx:])
+        
+        # If code_cells is provided and this is an expanded split, include previous cells
+        if code_cells is not None and cell_index > 0:
+            # Get the previous cells' content
+            previous_cells = code_cells[:cell_index]
+            expanded_prefix = []
+            
+            # Add each previous cell's content and its output if available
+            for prev_cell in previous_cells:
+                cell_source = self._get_cell_source(prev_cell)
+                expanded_prefix.append(cell_source)
+                
+                # Add output if available
+                if 'outputs' in prev_cell and prev_cell['outputs']:
+                    last_output = prev_cell['outputs'][-1]
+                    if 'text' in last_output:
+                        expanded_prefix.append('# Output from previous cell:\n' + ''.join(last_output['text']))
+                    elif 'data' in last_output and 'text/plain' in last_output['data']:
+                        expanded_prefix.append('# Output from previous cell:\n' + ''.join(last_output['data']['text/plain']))
+            
+            # Join all previous content with the current prefix
+            expanded_prefix = '\n\n'.join(expanded_prefix) + '\n\n' + prefix
+            
+            return {
+                'prefix': expanded_prefix,
+                'middle': middle,
+                'suffix': suffix,
+                'split_type': 'intracell_expanded',
+                'cell_index': cell_index
+            }
         
         return {
             'prefix': prefix,
@@ -198,6 +250,7 @@ class JupyterFIMGenerator:
     def _random_intracell_split(self, code: str, cell_index: int) -> Dict[str, Any]:
         """
         Create a FIM example by randomly splitting a code cell.
+        Ensures newline characters are properly handled at split points.
         
         Args:
             code: Source code string
@@ -211,7 +264,7 @@ class JupyterFIMGenerator:
             return None
         
         # Find split points on line boundaries if possible
-        lines = code.splitlines()
+        lines = code.splitlines(keepends=True)  # Keep the newline characters
         if len(lines) < 3:
             return None
             
@@ -219,9 +272,10 @@ class JupyterFIMGenerator:
         first_line_idx = random.randint(1, len(lines) // 3)
         second_line_idx = random.randint(2 * len(lines) // 3, len(lines) - 1)
         
-        prefix = '\n'.join(lines[:first_line_idx])
-        middle = '\n'.join(lines[first_line_idx:second_line_idx])
-        suffix = '\n'.join(lines[second_line_idx:])
+        # Join the lines, preserving newlines
+        prefix = ''.join(lines[:first_line_idx])
+        middle = ''.join(lines[first_line_idx:second_line_idx])
+        suffix = ''.join(lines[second_line_idx:])
         
         return {
             'prefix': prefix,
@@ -231,108 +285,9 @@ class JupyterFIMGenerator:
             'cell_index': cell_index
         }
     
-    def generate_midline_fim(self, code_cells: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Generate FIM examples by splitting in the middle of lines of code.
-        This creates examples useful for line-level autocomplete.
-        
-        Args:
-            code_cells: List of code cells from the notebook
-            
-        Returns:
-            List of FIM examples with mid-line splits
-        """
-        examples = []
-        
-        for i, cell in enumerate(code_cells):
-            source = self._get_cell_source(cell)
-            lines = source.splitlines()
-            
-            for line in lines:
-                # Skip empty lines, very short lines, or lines that are mostly whitespace
-                stripped_line = line.strip()
-                if len(stripped_line) < 12:  # Increased minimum line length
-                    continue
-                    
-                # Skip lines that are just comments
-                if stripped_line.startswith('#'):
-                    continue
-                    
-                # Skip lines that are just docstrings
-                if stripped_line.startswith('"""') or stripped_line.startswith("'''"):
-                    continue
-                
-                # Skip lines that are just assignments or simple statements
-                if '=' in stripped_line and len(stripped_line.split('=')) == 2:
-                    continue
-                
-                # Skip lines that are just function calls without arguments
-                if stripped_line.endswith('()'):
-                    continue
-                
-                # Find a good split point in the middle of the line
-                # Try to split at natural boundaries like spaces, operators, etc.
-                split_points = []
-                for j, char in enumerate(line):
-                    if char in ' ,;=+-*/()[]{}<>:':
-                        split_points.append(j)
-                
-                if len(split_points) < 2:  # Need at least 2 split points for better quality
-                    continue
-                    
-                # Choose a split point in the middle third of the line
-                middle_start = len(line) // 3
-                middle_end = 2 * len(line) // 3
-                valid_splits = [p for p in split_points if middle_start <= p <= middle_end]
-                
-                if not valid_splits:
-                    continue
-                    
-                # Only take one split point per line to avoid too many similar examples
-                split_point = random.choice(valid_splits)
-                
-                # Create the FIM example
-                prefix = line[:split_point]
-                middle = line[split_point:].strip()
-                
-                # Additional quality checks
-                if len(prefix.strip()) < 5 or len(middle.strip()) < 5:  # Increased minimum part length
-                    continue
-                
-                # Skip if the prefix ends with whitespace
-                if prefix.rstrip() != prefix:
-                    continue
-                
-                # Skip if the middle starts with whitespace
-                if middle.lstrip() != middle:
-                    continue
-                
-                # Skip if the middle is just a closing bracket or similar
-                if middle.strip() in ')]}':
-                    continue
-                
-                # Skip if the prefix is just an opening bracket or similar
-                if prefix.strip() in '([{':
-                    continue
-                
-                # Skip if the middle is just a comma or similar
-                if middle.strip() in ',;:':
-                    continue
-                
-                examples.append({
-                    'prefix': prefix,
-                    'middle': middle,
-                    'suffix': '',  # No suffix for midline splits
-                    'split_type': 'midline',
-                    'cell_index': i,
-                    'line_number': lines.index(line)
-                })
-        
-        return examples
-    
     def process_notebook(self, notebook_path: str) -> List[Dict[str, Any]]:
         """
-        Process a notebook to generate FIM examples at cell, intracell, and mid-line levels.
+        Process a notebook to generate FIM examples at both cell and intracell levels.
         
         Args:
             notebook_path: Path to the .ipynb file
@@ -351,15 +306,13 @@ class JupyterFIMGenerator:
         # Generate different types of FIM examples
         cell_level_examples = self.generate_cell_level_fim(code_cells)
         intracell_examples = self.generate_intracell_fim(code_cells)
-        midline_examples = self.generate_midline_fim(code_cells)
         
         # Combine all examples
-        all_examples = cell_level_examples + intracell_examples + midline_examples
+        all_examples = cell_level_examples + intracell_examples
         
         # Add metadata to each example
         for example in all_examples:
             example['source_file'] = notebook_path
-            example['notebook_name'] = notebook_path.split("/")[-1]
             example['language'] = 'python'  # Most Jupyter notebooks use Python
             example['full_context'] = example['prefix'] + example['middle'] + example['suffix']
             
@@ -422,7 +375,7 @@ def create_jupyter_fim_dataset(notebooks_directory: str, output_file: str):
 
 def filter_and_clean_examples(examples: List[Dict[str, Any]], 
                               min_length: int = 4,
-                              max_length: int = 1024) -> List[Dict[str, Any]]:
+                              max_length: int = 512) -> List[Dict[str, Any]]:
     """
     Filter and clean examples to ensure quality.
     
@@ -438,27 +391,16 @@ def filter_and_clean_examples(examples: List[Dict[str, Any]],
     
     for example in examples:
         # Check lengths
-        if example['split_type'] != 'midline':
-            if (len(example['prefix']) < min_length  or
-                len(example['middle']) < min_length or
-                len(example['suffix']) < min_length ):
-                continue
+        if (len(example['prefix']) < min_length or
+            len(example['middle']) < min_length or
+            len(example['suffix']) < min_length):
+            continue
             
-            if (len(example['prefix']) > max_length or
-                len(example['middle']) > max_length or
-                len(example['suffix']) > max_length):
-                continue
-
-        if example['split_type'] == 'midline':
-            if (len(example['prefix']) < min_length or
-                len(example['middle']) < min_length):
-                continue
-            
-            if (len(example['prefix']) > max_length // 5 or
-                len(example['middle']) > max_length // 5):
-                continue
+        if (len(example['prefix']) > max_length or
+            len(example['middle']) > max_length or
+            len(example['suffix']) > max_length):
+            continue
         
-
         # Remove examples with too many special characters or gibberish
         if _is_likely_gibberish(example['middle']):
             continue
@@ -473,35 +415,3 @@ def _is_likely_gibberish(text: str) -> bool:
     # Check for high concentration of unusual characters
     unusual_char_ratio = sum(1 for c in text if not (c.isalnum() or c.isspace() or c in '.,;:()[]{}<>+-*/=\'\"_')) / len(text) if text else 0
     return unusual_char_ratio > 0.3
-
-
-
-if __name__ == "__main__":
-    notebooks_directory = ".."  # Directory containing your .ipynb files
-    output_file = "jupyter_fim_dataset.json"
-    
-    create_jupyter_fim_dataset(notebooks_directory, output_file)
-    
-    # Optionally filter the dataset
-    with open(output_file, 'r', encoding='utf-8') as f:
-        examples = json.load(f)
-    
-    filtered_examples = filter_and_clean_examples(examples)
-    # downnsample the number of midline examples created
-
-    # Save filtered dataset
-    filtered_output_file = "jupyter_fim_dataset_filtered.json"
-    with open(filtered_output_file, 'w', encoding='utf-8') as f:
-        json.dump(filtered_examples, f, indent=2)
-        
-    print(f"Filtered dataset from {len(examples)} to {len(filtered_examples)} examples")
-    
-    # Print a sample
-    if filtered_examples:
-        sample = random.choice(filtered_examples)
-        print("\nSample Jupyter FIM example:")
-        print(f"SOURCE: {sample['source_file']}")
-        print(f"SPLIT TYPE: {sample['split_type']}")
-        print(f"\nPREFIX:\n{sample['prefix'][:200]}...")
-        print(f"\nMIDDLE (to predict):\n{sample['middle'][:200]}...")
-        print(f"\nSUFFIX:\n{sample['suffix'][:200]}...")
