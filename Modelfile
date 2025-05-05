@@ -1,2 +1,2 @@
-FROM qwen2.5-coder:1.5b-instruct-q4_1
-ADAPTER jupyter-pilot-f16.gguf
+FROM qwen2.5-coder:3b
+ADAPTER jupyter-pilot-f32.gguf

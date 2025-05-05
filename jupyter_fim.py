@@ -53,7 +53,7 @@ class JupyterFIMGenerator:
         code_cells = []
         
         for cell in notebook.get('cells', []):
-            if cell.get('cell_type') == 'code':
+            if cell.get('cell_type') in ['code', 'markdown']:
                 # Only include cells with sufficient content
                 source = self._get_cell_source(cell)
                 if len(source) >= self.min_cell_length:
@@ -153,10 +153,20 @@ class JupyterFIMGenerator:
                 if example:
                     examples.append(example)
                 
-                # Also create expanded version with context from previous cells
+                # Create expanded version with context from previous cells
                 expanded_example = self._create_intracell_fim(source, i, code_cells)
                 if expanded_example:
                     examples.append(expanded_example)
+                
+                # Create random split version
+                random_example = self._random_intracell_split(source, i)
+                if random_example:
+                    examples.append(random_example)
+                
+                # Create expanded random split version
+                random_expanded_example = self._random_intracell_split(source, i, code_cells)
+                if random_expanded_example:
+                    examples.append(random_expanded_example)
         
         return examples
     
@@ -188,8 +198,8 @@ class JupyterFIMGenerator:
         
         if len(all_matches) < 2:
             # Fall back to random splitting if not enough structure found
-            return self._random_intracell_split(code, cell_index)
-        
+            return self._random_intracell_split(code, cell_index, code_cells)
+
         # Choose two split points
         if len(all_matches) == 2:
             first_split, second_split = all_matches
@@ -247,7 +257,7 @@ class JupyterFIMGenerator:
             'cell_index': cell_index
         }
     
-    def _random_intracell_split(self, code: str, cell_index: int) -> Dict[str, Any]:
+    def _random_intracell_split(self, code: str, cell_index: int, code_cells: List[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """
         Create a FIM example by randomly splitting a code cell.
         Ensures newline characters are properly handled at split points.
@@ -255,9 +265,10 @@ class JupyterFIMGenerator:
         Args:
             code: Source code string
             cell_index: Index of the cell in the notebook
+            code_cells: Optional list of all code cells for expanded context
             
         Returns:
-            FIM example dictionary
+            FIM example dictionary or None if no suitable split found
         """
         # Make sure the code is long enough to split
         if len(code) < self.min_cell_length * 3:
@@ -276,6 +287,36 @@ class JupyterFIMGenerator:
         prefix = ''.join(lines[:first_line_idx])
         middle = ''.join(lines[first_line_idx:second_line_idx])
         suffix = ''.join(lines[second_line_idx:])
+        
+        # If code_cells is provided and this is an expanded split, include previous cells
+        if code_cells is not None and cell_index > 0:
+            # Get the previous cells' content
+            previous_cells = code_cells[:cell_index]
+            expanded_prefix = []
+            
+            # Add each previous cell's content and its output if available
+            for prev_cell in previous_cells:
+                cell_source = self._get_cell_source(prev_cell)
+                expanded_prefix.append(cell_source)
+                
+                # Add output if available
+                if 'outputs' in prev_cell and prev_cell['outputs']:
+                    last_output = prev_cell['outputs'][-1]
+                    if 'text' in last_output:
+                        expanded_prefix.append('# Output from previous cell:\n' + ''.join(last_output['text']))
+                    elif 'data' in last_output and 'text/plain' in last_output['data']:
+                        expanded_prefix.append('# Output from previous cell:\n' + ''.join(last_output['data']['text/plain']))
+            
+            # Join all previous content with the current prefix
+            expanded_prefix = '\n\n'.join(expanded_prefix) + '\n\n' + prefix
+            
+            return {
+                'prefix': expanded_prefix,
+                'middle': middle,
+                'suffix': suffix,
+                'split_type': 'intracell_random_expanded',
+                'cell_index': cell_index
+            }
         
         return {
             'prefix': prefix,
@@ -375,7 +416,7 @@ def create_jupyter_fim_dataset(notebooks_directory: str, output_file: str):
 
 def filter_and_clean_examples(examples: List[Dict[str, Any]], 
                               min_length: int = 4,
-                              max_length: int = 512) -> List[Dict[str, Any]]:
+                              max_length: int = 1024) -> List[Dict[str, Any]]:
     """
     Filter and clean examples to ensure quality.
     
@@ -392,7 +433,7 @@ def filter_and_clean_examples(examples: List[Dict[str, Any]],
     for example in examples:
         # Check lengths
         if (len(example['prefix']) < min_length or
-            len(example['middle']) < min_length or
+            len(example['middle']) < 0 or
             len(example['suffix']) < min_length):
             continue
             
@@ -414,4 +455,4 @@ def _is_likely_gibberish(text: str) -> bool:
     """Check if text is likely gibberish or binary content."""
     # Check for high concentration of unusual characters
     unusual_char_ratio = sum(1 for c in text if not (c.isalnum() or c.isspace() or c in '.,;:()[]{}<>+-*/=\'\"_')) / len(text) if text else 0
-    return unusual_char_ratio > 0.3
+    return unusual_char_ratio > 0.1

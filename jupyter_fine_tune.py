@@ -6,15 +6,15 @@ from transformers import TrainingArguments
 
 
 # Configuration
-BASE_MODEL = "unsloth/Qwen2.5-Coder-1.5B-bnb-4bit"
+BASE_MODEL = "unsloth/Qwen2.5-Coder-3B"
 SAVED_MODEL_NAME = "nkasmanoff/jupyter-pilot" # HF username + model name
-DATASET_PATH = "jupyter_fim_dataset_filtered.json"
+DATASET_PATH = "jupyter_fim.json"
 
 
 # Model parameters
 max_seq_length = 4096 
 dtype = None 
-load_in_4bit = True 
+load_in_4bit = False 
 
 
 def initialize_model(max_seq_length=4096, dtype=None, load_in_4bit=True):
@@ -66,10 +66,10 @@ def get_peft_model(model):
 def get_training_args():
     return TrainingArguments(
         run_name=f'{SAVED_MODEL_NAME}-sft',
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=16,
+        gradient_accumulation_steps=1,
         warmup_steps=5,
-        num_train_epochs=3,
+        num_train_epochs=1,
         save_steps=500,
         evaluation_strategy="steps",
         eval_steps=10,
